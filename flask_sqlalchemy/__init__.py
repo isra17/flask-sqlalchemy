@@ -19,7 +19,6 @@ from sqlalchemy.ext.declarative import DeclarativeMeta, declarative_base
 from sqlalchemy.orm.exc import UnmappedClassError
 from sqlalchemy.orm.session import Session as SessionBase
 
-from flask_sqlalchemy.model import Model
 from ._compat import itervalues, string_types, xrange
 from .model import DefaultMeta
 from . import utils
@@ -38,17 +37,6 @@ else:
 _signals = Namespace()
 models_committed = _signals.signal('models-committed')
 before_models_committed = _signals.signal('before-models-committed')
-
-
-def _make_table(db):
-    def _make_table(*args, **kwargs):
-        if len(args) > 1 and isinstance(args[1], db.Column):
-            args = (args[0], db.metadata) + args[1:]
-        info = kwargs.pop('info', None) or {}
-        info.setdefault('bind_key', None)
-        kwargs['info'] = info
-        return sqlalchemy.Table(*args, **kwargs)
-    return _make_table
 
 
 def _set_default_query_class(d, cls):
@@ -75,7 +63,6 @@ def _include_sqlalchemy(obj, cls):
             if not hasattr(obj, key):
                 setattr(obj, key, getattr(module, key))
     # Note: obj.Table does not attempt to be a SQLAlchemy Table class.
-    obj.Table = _make_table(obj)
     obj.relationship = _wrap_with_default_query_class(obj.relationship, cls)
     obj.relation = _wrap_with_default_query_class(obj.relation, cls)
     obj.dynamic_loader = _wrap_with_default_query_class(obj.dynamic_loader, cls)
@@ -706,26 +693,22 @@ class SQLAlchemy(object):
     Query = None
 
     def __init__(self, app=None, use_native_unicode=True, session_options=None,
-                 metadata=None, query_class=BaseQuery, model_class=Model,
-                 engine_options=None):
+                 query_class=BaseQuery, engine_options=None, bases=[]):
 
         self.use_native_unicode = use_native_unicode
         self.Query = query_class
         self.session = self.create_scoped_session(session_options)
-        self.Model = self.make_declarative_base(model_class, metadata)
         self._engine_lock = Lock()
         self.app = app
         self._engine_options = engine_options or {}
         _include_sqlalchemy(self, query_class)
 
+        for base in bases:
+            self.init_declarative_base(base)
+        self.bases = bases
+
         if app is not None:
             self.init_app(app)
-
-    @property
-    def metadata(self):
-        """The metadata associated with ``db.Model``."""
-
-        return self.Model.metadata
 
     def create_scoped_session(self, options=None):
         """Create a :class:`~sqlalchemy.orm.scoping.scoped_session`
@@ -766,7 +749,7 @@ class SQLAlchemy(object):
 
         return orm.sessionmaker(class_=SignallingSession, db=self, **options)
 
-    def make_declarative_base(self, model, metadata=None):
+    def init_declarative_base(self, model):
         """Creates the declarative base that all models will inherit from.
 
         :param model: base model class (or a tuple of base classes) to pass
@@ -780,24 +763,10 @@ class SQLAlchemy(object):
             ``model`` can be an existing declarative base in order to support
             complex customization such as changing the metaclass.
         """
-        if not isinstance(model, DeclarativeMeta):
-            model = declarative_base(
-                cls=model,
-                name='Model',
-                metadata=metadata,
-                metaclass=DefaultMeta
-            )
-
-        # if user passed in a declarative base and a metaclass for some reason,
-        # make sure the base uses the metaclass
-        if metadata is not None and model.metadata is not metadata:
-            model.metadata = metadata
-
         if not getattr(model, 'query_class', None):
             model.query_class = self.Query
 
         model.query = _QueryProperty(self)
-        return model
 
     def init_app(self, app):
         """This callback can be used to initialize an application for the
@@ -990,14 +959,6 @@ class SQLAlchemy(object):
             ' http://flask-sqlalchemy.pocoo.org/contexts/.'
         )
 
-    def get_tables_for_bind(self, bind=None):
-        """Returns a list of all tables relevant for a bind."""
-        result = []
-        for table in itervalues(self.Model.metadata.tables):
-            if table.info.get('bind_key') == bind:
-                result.append(table)
-        return result
-
     def get_binds(self, app=None):
         """Returns a dictionary with a table->engine mapping.
 
@@ -1030,29 +991,29 @@ class SQLAlchemy(object):
             op = getattr(self.Model.metadata, operation)
             op(bind=self.get_engine(app, bind), **extra)
 
-    def create_all(self, bind='__all__', app=None):
+    def create_all(self, metadata=None, app=None):
         """Creates all tables.
 
         .. versionchanged:: 0.12
            Parameters were added
         """
-        self._execute_for_all_tables(app, bind, 'create_all')
+        self._execute_for_all_tables(app, metadata, 'create_all')
 
-    def drop_all(self, bind='__all__', app=None):
+    def drop_all(self, metadata=None, app=None):
         """Drops all tables.
 
         .. versionchanged:: 0.12
            Parameters were added
         """
-        self._execute_for_all_tables(app, bind, 'drop_all')
+        self._execute_for_all_tables(app, metadata, 'drop_all')
 
-    def reflect(self, bind='__all__', app=None):
+    def reflect(self, metadata=None, app=None):
         """Reflects tables from the database.
 
         .. versionchanged:: 0.12
            Parameters were added
         """
-        self._execute_for_all_tables(app, bind, 'reflect', skip_tables=True)
+        self._execute_for_all_tables(app, metadata, 'reflect', skip_tables=True)
 
     def __repr__(self):
         return '<%s engine=%r>' % (
